@@ -2,3 +2,9 @@ venv/
 __pycache__/
 .pytest_cache/
 .DS_Store
+
+# Datos locales: base de datos, documentos cifrados y llaves privadas.
+# NUNCA deben subirse al repositorio.
+datos/
+llaves_locales/
+llaves_*/

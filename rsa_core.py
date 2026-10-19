@@ -29,7 +29,7 @@ EXPONENTE = 65537
 OAEP = padding.OAEP(mgf=padding.MGF1(hashes.SHA256()), algorithm=hashes.SHA256(), label=None)
 PSS = padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=32)
 
-# Un fragmento de Shamir es (x, y) con y < 2^521 - 1  ->  2 bytes para x + 66 para y
+
 TAM_X = 2
 TAM_Y = 66
 
@@ -92,7 +92,6 @@ def desenvolver_fragmento(privada: RSAPrivateKey, envuelto: bytes) -> tuple[int,
 
 # ------------------------------------ RSA-PSS: consentimiento de apertura
 def crear_consentimiento(nombre: str, id_documento: str) -> bytes:
-    """Texto que el actor firma para autorizar la apertura de un documento."""
     return json.dumps({
         "accion": "autorizo_apertura",
         "actor": nombre,
