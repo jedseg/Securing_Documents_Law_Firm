@@ -101,7 +101,7 @@ def proteger(documento: bytes, id_documento: str, privada_firmante: Ed25519Priva
     dek = generar_llave()
     paquete = cifrar(dek, documento, id_documento.encode())
     fragmentos = shamir.dividir_secreto(dek, t, n)
-    del dek  # la llave completa no se guarda en ningún lado
+    del dek  
     return DocumentoProtegido(id_documento, paquete, firma, t, n), fragmentos
 
 

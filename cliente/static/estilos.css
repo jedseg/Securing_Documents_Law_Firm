@@ -1,0 +1,43 @@
+:root {
+  --azul: #14213d;
+  --dorado: #c9a227;
+  --bs-primary: #14213d;
+  --bs-primary-rgb: 20, 33, 61;
+}
+
+body { background: #f5f4ef; }
+
+.barra { background: var(--azul); }
+.text-dorado { color: var(--dorado); }
+
+.btn-primary {
+  --bs-btn-bg: var(--azul);
+  --bs-btn-border-color: var(--azul);
+  --bs-btn-hover-bg: #23345c;
+  --bs-btn-hover-border-color: #23345c;
+  --bs-btn-active-bg: #0e182d;
+}
+
+.nav-tabs .nav-link { color: #4a5568; }
+.nav-tabs .nav-link.active { color: var(--azul); font-weight: 600; }
+
+.badge-abogado { background: var(--dorado); color: #1a1a1a; }
+.badge-cliente { background: #5b8def; }
+
+.tarjeta-doc { border-left: 4px solid var(--azul); }
+.participante { font-size: .85rem; }
+
+.documento-texto {
+  white-space: pre-wrap;
+  font-family: Georgia, serif;
+  font-size: 1.05rem;
+  background: #fffdf7;
+  border: 1px solid #e6e1d3;
+  border-radius: .5rem;
+  padding: 1rem 1.25rem;
+}
+
+code.hash { word-break: break-all; font-size: .75rem; }
+
+.visor-pdf { width: 100%; height: 70vh; border: 1px solid #e6e1d3; border-radius: .5rem; }
+.vista-previa img { max-height: 70vh; }
