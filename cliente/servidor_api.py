@@ -8,16 +8,31 @@ firmas y llaves PÚBLICAS: nunca llaves privadas ni documentos en claro.
 
 import base64
 import os
+import ssl
 
 import requests
+from requests.adapters import HTTPAdapter
 from cryptography.hazmat.primitives import serialization
 
 import crypto_core as cc
 
-URL = os.environ.get("SERVIDOR_URL", "http://127.0.0.1:8000")
-# Con TLS y certificado autofirmado: SERVIDOR_CA=ruta/al/certificado.pem
-VERIFICAR = os.environ.get("SERVIDOR_CA", True)
+URL = os.environ.get("SERVIDOR_URL", "http://127.0.0.1:8000").rstrip("/")
+# Con un certificado propio (por ejemplo, la CA local de Caddy): SERVIDOR_CA=ruta/al/root.crt
+VERIFICAR = os.environ.get("SERVIDOR_CA") or True
 TIEMPO = 15
+
+
+class AdaptadorTLS13(HTTPAdapter):
+    """Conexiones HTTPS que rechazan cualquier versión anterior a TLS 1.3.
+    Lo exige el CLIENTE: aunque el servidor aceptara TLS 1.2, aquí no se negocia."""
+
+    def init_poolmanager(self, *args, **kwargs):
+        kwargs["ssl_minimum_version"] = ssl.TLSVersion.TLSv1_3
+        return super().init_poolmanager(*args, **kwargs)
+
+
+_sesion = requests.Session()
+_sesion.mount("https://", AdaptadorTLS13())
 
 
 class ErrorServidor(Exception):
@@ -46,8 +61,11 @@ def pem_a_publica(pem: str):
 def _pedir(metodo: str, ruta: str, token: str | None = None, **kwargs):
     cabeceras = {"Authorization": f"Bearer {token}"} if token else {}
     try:
-        r = requests.request(metodo, URL + ruta, headers=cabeceras, timeout=TIEMPO,
-                             verify=VERIFICAR, **kwargs)
+        r = _sesion.request(metodo, URL + ruta, headers=cabeceras, timeout=TIEMPO,
+                            verify=VERIFICAR, **kwargs)
+    except requests.exceptions.SSLError:
+        raise ErrorServidor(503, f"Conexión insegura rechazada con {URL}: se exige TLS 1.3 "
+                                 "y un certificado válido del servidor")
     except requests.RequestException:
         raise ErrorServidor(503, f"No hay conexión con el servidor del bufete ({URL})")
     if r.status_code >= 400:

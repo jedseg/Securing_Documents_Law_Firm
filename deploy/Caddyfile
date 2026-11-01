@@ -1,0 +1,22 @@
+# Caddy: proxy inverso con HTTPS delante del servidor del bufete.
+#
+#   DOMINIO    nombre del servidor (local: bufete.internal; en AWS: el dominio real)
+#   CADDY_TLS  "internal" = certificado de la CA local de Caddy (desarrollo)
+#              un correo  = certificado de Let's Encrypt (producción)
+
+{$DOMINIO:bufete.internal} {
+	tls {$CADDY_TLS:internal} {
+		# Solo TLS 1.3: se rechaza cualquier cliente que intente TLS 1.2 o anterior
+		protocols tls1.3
+	}
+
+	encode gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		-Server
+	}
+
+	reverse_proxy servidor:8000
+}

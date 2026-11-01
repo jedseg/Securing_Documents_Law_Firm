@@ -8,3 +8,7 @@ __pycache__/
 datos/
 llaves_locales/
 llaves_*/
+
+# Configuración y certificados locales de Docker
+.env
+deploy/ca_local/

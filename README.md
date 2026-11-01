@@ -59,6 +59,10 @@ Los permisos se aplican en el **servidor**; la interfaz solo oculta lo que cada 
 | `cliente/paquete.py` | Junta nombre, tipo y contenido del archivo en un solo bloque que se firma y se cifra |
 | `cliente/servidor_api.py` | Conexión del cliente local con el servidor |
 | `cliente/static/` | Interfaz web: `index.html`, `app.js`, `estilos.css` (Bootstrap 5) |
+| `Dockerfile` | Imagen única para el servidor y el cliente local |
+| `docker-compose.yml` | Servidor + Caddy (HTTPS, solo TLS 1.3) |
+| `docker-compose.demo.yml` | Agrega los clientes locales del abogado y del cliente para la demostración |
+| `deploy/Caddyfile` | Configuración de Caddy: certificado, TLS 1.3 y proxy hacia el servidor |
 
 ## Servicios criptográficos
 
@@ -73,9 +77,45 @@ Los permisos se aplican en el **servidor**; la interfaz solo oculta lo que cada 
 | Protección de llaves privadas | PKCS#8 cifrado con la contraseña del usuario |
 | Contraseñas en el servidor | scrypt con sal aleatoria (nunca se guardan en claro) |
 | Sesiones | Token aleatorio de 256 bits; el servidor solo guarda su SHA-256 |
+| Canal cliente ↔ servidor | TLS 1.3 obligatorio (lo exigen Caddy y el cliente local) |
 | Autenticación de dos factores (MFA) | TOTP: HMAC-SHA1 sobre el tiempo (RFC 6238); secreto cifrado con AES-256-GCM en el servidor |
 
-## Ejecutar
+## Ejecutar con Docker (recomendado)
+
+Requiere Docker Desktop. Desde la carpeta del proyecto:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.demo.yml up --build
+```
+
+- Abogado: http://127.0.0.1:8080
+- Cliente: http://127.0.0.1:8081
+- Detener: `Ctrl + C` (o `docker compose -f docker-compose.yml -f docker-compose.demo.yml down`)
+
+Qué se levanta:
+
+| Servicio | Papel | Puertos |
+|---|---|---|
+| `servidor` | Servidor del bufete (FastAPI) | ninguno: solo se llega por Caddy |
+| `caddy` | HTTPS con **solo TLS 1.3** delante del servidor | 80 y 443 |
+| `abogado`, `cliente` | Clientes locales (uno por "computadora"), con su propia carpeta de llaves | `127.0.0.1:8080` y `127.0.0.1:8081` |
+
+- Los datos del servidor quedan en `datos/` y las llaves privadas en `llaves_abogado/` y `llaves_cliente/`, igual que sin Docker (no se suben al repositorio).
+- En local, Caddy usa su propia autoridad certificadora; su certificado raíz se copia a `deploy/ca_local/root.crt` y los clientes lo usan para verificar al servidor.
+- **TLS 1.3 por los dos lados:** Caddy solo ofrece TLS 1.3 y el cliente local (`cliente/servidor_api.py`) rechaza cualquier versión anterior, aunque el servidor la aceptara.
+
+Comprobar TLS 1.3 desde la Terminal:
+
+```bash
+# TLS 1.3: conecta y muestra "TLSv1.3"
+openssl s_client -connect localhost:443 -servername bufete.internal -tls1_3 -CAfile deploy/ca_local/root.crt </dev/null | grep -E "Protocol|Verify return"
+# TLS 1.2: debe fallar
+openssl s_client -connect localhost:443 -servername bufete.internal -tls1_2 </dev/null
+```
+
+En producción (AWS) solo se levanta `docker-compose.yml`, con un archivo `.env` basado en `.env.example` (dominio, correo para Let's Encrypt, código del bufete y `TOTP_LLAVE`).
+
+## Ejecutar sin Docker
 
 La primera vez:
 

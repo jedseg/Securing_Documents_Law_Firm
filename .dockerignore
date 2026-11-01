@@ -1,0 +1,14 @@
+# Nada de datos, llaves ni entornos locales dentro de la imagen
+.git
+.env
+venv/
+.venv/
+__pycache__/
+.pytest_cache/
+.DS_Store
+datos/
+llaves_*/
+llaves_locales/
+pruebas*.py
+Securing_Documents_Law_Firm/
+deploy/

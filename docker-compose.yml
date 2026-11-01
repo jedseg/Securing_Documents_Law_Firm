@@ -1,0 +1,45 @@
+# Servidor del bufete: FastAPI + Caddy (HTTPS, solo TLS 1.3).
+#
+#   Local (Mac):  docker compose up --build
+#   AWS:          igual, con DOMINIO y CADDY_TLS en el archivo .env
+#
+# El servidor NO publica puertos: solo se llega a él a través de Caddy (443).
+
+services:
+  servidor:
+    build: .
+    restart: unless-stopped
+    environment:
+      BUFETE_CODIGO: ${BUFETE_CODIGO:-BUFETE-2026}
+      TOTP_LLAVE: ${TOTP_LLAVE:-}
+      BACKEND_DB: /datos/bufete.db
+      ALMACEN_DIR: /datos/almacen
+      TOTP_LLAVE_ARCHIVO: /datos/totp.key
+    volumes:
+      - ./datos:/datos            # base de datos y documentos cifrados (respaldar esta carpeta)
+    expose:
+      - "8000"
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - servidor
+    environment:
+      DOMINIO: ${DOMINIO:-bufete.internal}
+      CADDY_TLS: ${CADDY_TLS:-internal}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data           # certificados (y la CA local en desarrollo)
+      - caddy_config:/config
+    networks:
+      default:
+        aliases:
+          - ${DOMINIO:-bufete.internal}
+
+volumes:
+  caddy_data:
+  caddy_config:

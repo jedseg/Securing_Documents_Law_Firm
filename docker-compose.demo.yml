@@ -1,0 +1,60 @@
+# Demostración en una sola computadora: servidor + "equipo del abogado" + "equipo del cliente".
+#
+#   docker compose -f docker-compose.yml -f docker-compose.demo.yml up --build
+#
+#   Abogado: http://127.0.0.1:8080      Cliente: http://127.0.0.1:8081
+#
+# Cada cliente local tiene SU carpeta de llaves privadas (simula dos computadoras)
+# y solo se publica en 127.0.0.1: nadie más en la red puede conectarse a él.
+# Los clientes hablan con el servidor por HTTPS a través de Caddy y exigen TLS 1.3.
+
+services:
+  # Copia el certificado raíz de la CA local de Caddy a deploy/ca_local/ para
+  # que los clientes (y tú, con curl u openssl) puedan verificar el servidor.
+  ca-local:
+    image: caddy:2
+    depends_on:
+      - caddy
+    restart: "no"
+    volumes:
+      - caddy_data:/data:ro
+      - ./deploy/ca_local:/salida
+    command: >
+      sh -c 'for i in $$(seq 60); do
+               if [ -f /data/caddy/pki/authorities/local/root.crt ]; then
+                 cp /data/caddy/pki/authorities/local/root.crt /salida/root.crt &&
+                 chmod 644 /salida/root.crt && echo "CA local exportada" && exit 0;
+               fi; sleep 1;
+             done; echo "No apareció la CA local de Caddy"; exit 1'
+
+  abogado:
+    build: .
+    command: ["uvicorn", "cliente.main:app", "--host", "0.0.0.0", "--port", "8080"]
+    depends_on:
+      ca-local:
+        condition: service_completed_successfully
+    environment:
+      LLAVERO_DIR: /llaves
+      SERVIDOR_URL: https://${DOMINIO:-bufete.internal}
+      SERVIDOR_CA: /ca/root.crt
+    volumes:
+      - ./llaves_abogado:/llaves
+      - ./deploy/ca_local:/ca:ro
+    ports:
+      - "127.0.0.1:8080:8080"
+
+  cliente:
+    build: .
+    command: ["uvicorn", "cliente.main:app", "--host", "0.0.0.0", "--port", "8081"]
+    depends_on:
+      ca-local:
+        condition: service_completed_successfully
+    environment:
+      LLAVERO_DIR: /llaves
+      SERVIDOR_URL: https://${DOMINIO:-bufete.internal}
+      SERVIDOR_CA: /ca/root.crt
+    volumes:
+      - ./llaves_cliente:/llaves
+      - ./deploy/ca_local:/ca:ro
+    ports:
+      - "127.0.0.1:8081:8081"
