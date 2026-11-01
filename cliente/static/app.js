@@ -79,6 +79,7 @@ const valor = id => document.getElementById(id).value.trim();
 function entrarAlPanel(usuario) {
   usuarioActual = usuario;
   if (usuario.debe_activar) { mostrarVista("vista-activar"); return; }
+  if (usuario.debe_configurar_totp) { mostrarAltaTotp(); return; }
 
   document.getElementById("nav-usuario").classList.replace("d-none", "d-flex");
   document.getElementById("nav-nombre").textContent = `${usuario.nombre} (${usuario.usuario})`;
@@ -106,9 +107,59 @@ function salirAlLogin() {
 document.getElementById("form-login").addEventListener("submit", e => {
   e.preventDefault();
   conCarga(e.submitter, async () => {
-    const usuario = await api("POST", "/api/login",
+    const r = await api("POST", "/api/login",
       { usuario: valor("login-usuario"), contrasena: document.getElementById("login-contrasena").value });
+    if (r.requiere_totp) {
+      // Contraseña correcta: falta el segundo factor
+      document.getElementById("login-contrasena").value = "";
+      mostrarVista("vista-totp");
+      document.getElementById("totp-codigo").focus();
+      return;
+    }
+    entrarAlPanel(r);
+  });
+});
+
+// ------------------------------------------- Verificación en dos pasos
+document.getElementById("form-totp").addEventListener("submit", e => {
+  e.preventDefault();
+  const campo = document.getElementById("totp-codigo");
+  conCarga(e.submitter, async () => {
+    try {
+      const usuario = await api("POST", "/api/login/totp", { codigo: campo.value.trim() });
+      campo.value = "";
+      entrarAlPanel(usuario);
+    } catch (err) {
+      campo.value = "";
+      if (err.estado === 410 || err.estado === 429) {   // expiró o demasiados intentos
+        salirAlLogin();
+        alerta(err.message, "warning");
+        return;
+      }
+      throw err;
+    }
+  });
+});
+
+async function mostrarAltaTotp() {
+  mostrarVista("vista-totp-alta");
+  const qr = document.getElementById("totp-qr");
+  qr.removeAttribute("src");
+  document.getElementById("totp-secreto").textContent = "";
+  try {
+    const r = await api("POST", "/api/totp/iniciar");
+    qr.src = r.qr;
+    document.getElementById("totp-secreto").textContent = r.secreto;
+  } catch (e) { manejarError(e); }
+}
+
+document.getElementById("form-totp-alta").addEventListener("submit", e => {
+  e.preventDefault();
+  conCarga(e.submitter, async () => {
+    const usuario = await api("POST", "/api/totp/confirmar", { codigo: valor("totp-alta-codigo") });
+    e.target.reset();
     entrarAlPanel(usuario);
+    alerta("Autenticador activado. Desde ahora se le pedirá el código al iniciar sesión.", "success");
   });
 });
 
@@ -141,7 +192,8 @@ document.getElementById("form-activar").addEventListener("submit", e => {
     const usuario = await api("POST", "/api/activar",
       { contrasena_actual: document.getElementById("act-actual").value, contrasena_nueva: nueva });
     entrarAlPanel(usuario);
-    alerta("Cuenta activada. Sus llaves RSA se generaron y guardaron cifradas en este equipo.", "success");
+    alerta("Cuenta activada. Sus llaves RSA se generaron y guardaron cifradas en este equipo. " +
+           "Ahora configure su autenticador.", "success");
   });
 });
 
@@ -308,6 +360,8 @@ const NOMBRES_EVENTO = {
   cliente_activado: "Cliente activó su cuenta", login: "Inicio de sesión",
   login_fallido: "Inicio de sesión fallido", documento_creado: "Documento creado",
   consentimiento: "Consentimiento de apertura", aporte: "Fragmento enviado",
+  login_contrasena_ok: "Contraseña correcta", login_totp_fallido: "Código TOTP incorrecto",
+  totp_activado: "Autenticador activado",
 };
 
 async function cargarBitacora() {

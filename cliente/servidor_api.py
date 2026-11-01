@@ -78,7 +78,29 @@ def registrar_abogado(usuario, nombre, contrasena, codigo, actor, publica_ed) ->
 
 
 def login(usuario: str, contrasena: str) -> dict:
+    """Paso 1. Devuelve la sesión o, si el usuario tiene MFA, {"requiere_totp": True, "reto": ...}."""
     return _pedir("POST", "/auth/login", json={"usuario": usuario, "contrasena": contrasena})
+
+
+def login_totp(reto: str, codigo: str) -> dict:
+    """Paso 2: código de la app autenticadora."""
+    return _pedir("POST", "/auth/login/totp", json={"reto": reto, "codigo": codigo})
+
+
+def totp_iniciar(token) -> dict:
+    return _pedir("POST", "/yo/totp/iniciar", token)
+
+
+def totp_confirmar(token, codigo: str) -> None:
+    _pedir("POST", "/yo/totp/confirmar", token, json={"codigo": codigo})
+
+
+def mis_llaves(token) -> dict:
+    datos = _pedir("GET", "/yo/llaves", token)
+    for campo in ("publica_cifrado", "publica_firma", "publica_ed25519"):
+        if datos.get(campo):
+            datos[campo] = pem_a_publica(datos[campo])
+    return datos
 
 
 def logout(token: str) -> None:

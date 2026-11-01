@@ -3,5 +3,6 @@ fastapi
 uvicorn
 python-multipart
 requests
+qrcode
 pytest
 httpx

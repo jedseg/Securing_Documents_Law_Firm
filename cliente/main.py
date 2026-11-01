@@ -13,9 +13,14 @@ y abrir  http://127.0.0.1:8080  en el navegador.
 Solo acepta conexiones desde esta misma computadora (127.0.0.1).
 """
 
+import base64
 import secrets
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
+
+import qrcode
+import qrcode.image.svg
 
 from cryptography.exceptions import InvalidTag
 from urllib.parse import quote
@@ -46,6 +51,7 @@ class Sesion:
     nombre: str
     rol: str
     debe_activar: bool = False
+    debe_configurar_totp: bool = False
     actor: rc.Actor | None = None
     privada_ed: object | None = None
     # Fragmentos propios ya descifrados, solo en memoria: id_documento -> (x, y)
@@ -55,6 +61,19 @@ class Sesion:
 
 
 SESIONES: dict[str, Sesion] = {}
+
+
+@dataclass
+class LoginPendiente:
+    """Contraseña correcta y llavero abierto, esperando el código TOTP (paso 2)."""
+    reto: str
+    actor: rc.Actor
+    privada_ed: object | None
+    expira: float
+
+
+PENDIENTES: dict[str, LoginPendiente] = {}
+VIGENCIA_PENDIENTE_SEG = 300
 
 
 # ======================================================== Protección local
@@ -101,6 +120,8 @@ def sesion_actual(request: Request) -> Sesion:
 def sesion_lista(s: Sesion = Depends(sesion_actual)) -> Sesion:
     if s.debe_activar or s.actor is None:
         raise HTTPException(403, "Primero active su cuenta")
+    if s.debe_configurar_totp:
+        raise HTTPException(403, "Primero configure su autenticador")
     return s
 
 
@@ -111,7 +132,8 @@ def solo_abogado(s: Sesion = Depends(sesion_lista)) -> Sesion:
 
 
 def datos_sesion(s: Sesion) -> dict:
-    return {"usuario": s.usuario, "nombre": s.nombre, "rol": s.rol, "debe_activar": s.debe_activar}
+    return {"usuario": s.usuario, "nombre": s.nombre, "rol": s.rol, "debe_activar": s.debe_activar,
+            "debe_configurar_totp": s.debe_configurar_totp}
 
 
 # ================================================================= Modelos
@@ -130,6 +152,10 @@ class RegistroEntrada(BaseModel):
 class ActivarEntrada(BaseModel):
     contrasena_actual: str
     contrasena_nueva: str
+
+
+class CodigoEntrada(BaseModel):
+    codigo: str
 
 
 class ClienteEntrada(BaseModel):
@@ -164,35 +190,107 @@ def registro_abogado(e: RegistroEntrada):
     return {"ok": True}
 
 
+def abrir_llavero(usuario: str, contrasena: str):
+    if not llavero.existe(usuario):
+        raise HTTPException(409, "Este equipo no tiene las llaves privadas de este usuario. "
+                                 "Inicie sesión desde el equipo donde activó su cuenta.")
+    try:
+        return llavero.cargar(usuario, contrasena.encode())
+    except ValueError:
+        raise HTTPException(401, "No se pudo abrir el llavero local con esa contraseña")
+
+
+def crear_sesion(request: Request, response: Response, datos: dict, actor, privada_ed) -> dict:
+    """Crea la sesión local cuando el servidor ya entregó su token."""
+    sesion = Sesion(token=datos["token"], usuario=datos["usuario"], nombre=datos["nombre"],
+                    rol=datos["rol"], debe_activar=datos["debe_cambiar"],
+                    debe_configurar_totp=not datos["totp_activo"],
+                    actor=actor, privada_ed=privada_ed)
+    if actor is not None:
+        # Comprueba que el servidor tenga registradas exactamente MIS llaves públicas
+        registradas = srv.mis_llaves(sesion.token)
+        if (srv.publica_a_pem(registradas["publica_cifrado"]) != srv.publica_a_pem(actor.publica_cifrado)
+                or srv.publica_a_pem(registradas["publica_firma"]) != srv.publica_a_pem(actor.publica_firma)):
+            srv.logout(sesion.token)
+            raise HTTPException(409, "Las llaves públicas del servidor no coinciden con las de "
+                                     "este equipo. Posible suplantación.")
+    abrir_sesion(request, response, sesion)
+    return datos_sesion(sesion)
+
+
+def cookie_pendiente(request: Request) -> str:
+    return f"login_pendiente_{request.url.port or 80}"
+
+
 @app.post("/api/login")
 def login(e: LoginEntrada, request: Request, response: Response):
+    """Paso 1: contraseña. Con MFA, el llavero se abre aquí y la sesión espera el código."""
     datos = srv.login(e.usuario, e.contrasena)
-    sesion = Sesion(token=datos["token"], usuario=datos["usuario"], nombre=datos["nombre"],
-                    rol=datos["rol"])
+
+    if datos.get("requiere_totp"):
+        actor, privada_ed = abrir_llavero(e.usuario, e.contrasena)
+        for pid in [p for p, v in PENDIENTES.items() if v.expira < time.time()]:
+            del PENDIENTES[pid]
+        pid = secrets.token_urlsafe(32)
+        PENDIENTES[pid] = LoginPendiente(datos["reto"], actor, privada_ed,
+                                         time.time() + VIGENCIA_PENDIENTE_SEG)
+        response.set_cookie(cookie_pendiente(request), pid, httponly=True, samesite="strict",
+                            max_age=VIGENCIA_PENDIENTE_SEG)
+        return {"requiere_totp": True}
 
     if datos["debe_cambiar"]:
         # Cliente nuevo: debe crear su contraseña y sus llaves en este equipo
-        sesion.debe_activar = True
-    else:
-        if not llavero.existe(e.usuario):
-            srv.logout(datos["token"])
-            raise HTTPException(409, "Este equipo no tiene las llaves privadas de este usuario. "
-                                     "Inicie sesión desde el equipo donde activó su cuenta.")
-        try:
-            sesion.actor, sesion.privada_ed = llavero.cargar(e.usuario, e.contrasena.encode())
-        except ValueError:
-            srv.logout(datos["token"])
-            raise HTTPException(401, "No se pudo abrir el llavero local con esa contraseña")
-        # Comprueba que el servidor tenga registradas exactamente MIS llaves públicas
-        registradas = srv.llaves(sesion.token, sesion.usuario)
-        if (srv.publica_a_pem(registradas["publica_cifrado"]) != srv.publica_a_pem(sesion.actor.publica_cifrado)
-                or srv.publica_a_pem(registradas["publica_firma"]) != srv.publica_a_pem(sesion.actor.publica_firma)):
-            srv.logout(datos["token"])
-            raise HTTPException(409, "Las llaves públicas del servidor no coinciden con las de "
-                                     "este equipo. Posible suplantación.")
+        return crear_sesion(request, response, datos, None, None)
+    try:
+        actor, privada_ed = abrir_llavero(e.usuario, e.contrasena)
+    except HTTPException:
+        srv.logout(datos["token"])
+        raise
+    return crear_sesion(request, response, datos, actor, privada_ed)
 
-    abrir_sesion(request, response, sesion)
-    return datos_sesion(sesion)
+
+@app.post("/api/login/totp")
+def login_totp(e: CodigoEntrada, request: Request, response: Response):
+    """Paso 2: código de 6 dígitos de la app autenticadora."""
+    pid = request.cookies.get(cookie_pendiente(request), "")
+    pendiente = PENDIENTES.get(pid)
+    if not pendiente or pendiente.expira < time.time():
+        PENDIENTES.pop(pid, None)
+        raise HTTPException(410, "El inicio de sesión expiró. Vuelva a escribir su contraseña.")
+    try:
+        datos = srv.login_totp(pendiente.reto, e.codigo)
+    except srv.ErrorServidor as error:
+        if error.estado in (410, 429):
+            PENDIENTES.pop(pid, None)
+        raise
+    PENDIENTES.pop(pid, None)
+    response.delete_cookie(cookie_pendiente(request))
+    return crear_sesion(request, response, datos, pendiente.actor, pendiente.privada_ed)
+
+
+def qr_svg(texto: str) -> str:
+    """Código QR como imagen SVG (data URL), generada en este equipo."""
+    imagen = qrcode.make(texto, image_factory=qrcode.image.svg.SvgPathImage, box_size=10, border=2)
+    return "data:image/svg+xml;base64," + base64.b64encode(imagen.to_string()).decode()
+
+
+@app.post("/api/totp/iniciar")
+def totp_iniciar(s: Sesion = Depends(sesion_actual)):
+    if s.debe_activar:
+        raise HTTPException(403, "Primero active su cuenta")
+    if not s.debe_configurar_totp:
+        raise HTTPException(409, "El autenticador ya está configurado")
+    datos = srv.totp_iniciar(s.token)
+    secreto = datos["secreto"]
+    return {"qr": qr_svg(datos["uri"]),
+            "secreto": " ".join(secreto[i:i + 4] for i in range(0, len(secreto), 4))}
+
+
+@app.post("/api/totp/confirmar")
+def totp_confirmar(e: CodigoEntrada, s: Sesion = Depends(sesion_actual)):
+    srv.totp_confirmar(s.token, e.codigo)
+    s.debe_configurar_totp = False
+    return datos_sesion(s)
 
 
 @app.post("/api/activar")

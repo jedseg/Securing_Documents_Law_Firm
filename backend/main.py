@@ -17,6 +17,7 @@ import binascii
 import json
 import os
 import re
+import secrets
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -27,6 +28,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
 import rsa_core as rc
+import totp
 from backend import db, seguridad
 
 # Código que un abogado necesita para registrarse (lo entrega el bufete)
@@ -39,6 +41,11 @@ MAX_INTENTOS, BLOQUEO_SEG = 5, 300
 PATRON_ID = r"^[A-Za-z0-9_-]{1,64}$"          # también se usa como nombre de archivo
 PATRON_USUARIO = r"^[a-z0-9_.-]{3,32}$"
 _intentos_fallidos: dict[str, list[float]] = {}
+
+# Login en dos pasos: tras la contraseña correcta se entrega un "reto" de un solo
+# uso que solo sirve para enviar el código TOTP. Se guarda su SHA-256, no el reto.
+VIGENCIA_RETO_SEG, MAX_INTENTOS_RETO = 300, 5
+_retos_totp: dict[str, dict] = {}
 
 
 @asynccontextmanager
@@ -67,6 +74,15 @@ class RegistroAbogado(LlavesPublicas):
 class Login(BaseModel):
     usuario: str
     contrasena: str
+
+
+class LoginTotp(BaseModel):
+    reto: str
+    codigo: str = Field(max_length=10)
+
+
+class CodigoTotp(BaseModel):
+    codigo: str = Field(max_length=10)
 
 
 class AltaCliente(BaseModel):
@@ -133,8 +149,9 @@ def hace(delta: timedelta) -> str:
 
 
 # ============================================================ Autenticación
-def usuario_actual(authorization: str = Header(default="")) -> dict:
-    """Dependencia: obtiene el usuario a partir del token 'Bearer <token>'."""
+def sesion_valida(authorization: str = Header(default="")) -> dict:
+    """Dependencia: obtiene el usuario a partir del token 'Bearer <token>'.
+    Solo la usan los pasos previos al MFA (activar cuenta, configurar TOTP, salir)."""
     if not authorization.startswith("Bearer "):
         raise HTTPException(401, "Inicie sesión")
     token_hash = seguridad.hash_token(authorization.removeprefix("Bearer "))
@@ -145,6 +162,13 @@ def usuario_actual(authorization: str = Header(default="")) -> dict:
     if not fila:
         raise HTTPException(401, "Sesión inválida o expirada")
     return dict(fila)
+
+
+def usuario_actual(u: dict = Depends(sesion_valida)) -> dict:
+    """Dependencia general: además de la sesión, exige el autenticador (MFA) configurado."""
+    if not u["totp_activo"]:
+        raise HTTPException(403, "Primero configure su autenticador (verificación en dos pasos)")
+    return u
 
 
 def solo_abogado(u: dict = Depends(usuario_actual)) -> dict:
@@ -163,7 +187,37 @@ def activo(u: dict = Depends(usuario_actual)) -> dict:
 def datos_publicos(u: dict) -> dict:
     return {"usuario": u["usuario"], "nombre": u["nombre"], "rol": u["rol"],
             "abogado": u["abogado"], "debe_cambiar": bool(u["debe_cambiar"]),
-            "llaves_registradas": bool(u["publica_cifrado"])}
+            "llaves_registradas": bool(u["publica_cifrado"]),
+            "totp_activo": bool(u["totp_activo"])}
+
+
+def bloqueado(usuario: str) -> list[float]:
+    """Intentos fallidos recientes (contraseña o TOTP); lanza 429 si ya son demasiados."""
+    ahora = time.time()
+    recientes = [t for t in _intentos_fallidos.get(usuario, []) if ahora - t < BLOQUEO_SEG]
+    if len(recientes) >= MAX_INTENTOS:
+        raise HTTPException(429, "Demasiados intentos fallidos. Espere unos minutos.")
+    return recientes
+
+
+def crear_sesion(con, u) -> dict:
+    token, token_hash, expira = seguridad.nuevo_token()
+    con.execute("DELETE FROM sesiones WHERE expira <= ?", (seguridad.ahora(),))
+    con.execute("INSERT INTO sesiones (token_hash, usuario, expira) VALUES (?, ?, ?)",
+                (token_hash, u["usuario"], expira))
+    return {"token": token, "expira": expira, **datos_publicos(dict(u))}
+
+
+def comprobar_totp(con, u, codigo: str) -> bool:
+    """Verifica el código TOTP del usuario y, si es válido, marca ese paso como usado."""
+    if not u["totp_secreto"]:
+        return False
+    secreto = seguridad.descifrar_secreto_totp(u["totp_secreto"], u["usuario"])
+    paso = totp.verificar(secreto, codigo, ultimo_paso=u["totp_ultimo_paso"])
+    if paso is None:
+        return False
+    con.execute("UPDATE usuarios SET totp_ultimo_paso = ? WHERE usuario = ?", (paso, u["usuario"]))
+    return True
 
 
 def participantes(con, id_documento: str) -> list[str]:
@@ -216,10 +270,9 @@ def registro_abogado(entrada: RegistroAbogado):
 
 @app.post("/auth/login")
 def login(entrada: Login):
+    """Paso 1: contraseña. Si el usuario tiene autenticador, devuelve un reto para el paso 2."""
     ahora = time.time()
-    recientes = [t for t in _intentos_fallidos.get(entrada.usuario, []) if ahora - t < BLOQUEO_SEG]
-    if len(recientes) >= MAX_INTENTOS:
-        raise HTTPException(429, "Demasiados intentos fallidos. Espere unos minutos.")
+    recientes = bloqueado(entrada.usuario)
 
     with db.conexion() as con:
         u = con.execute("SELECT * FROM usuarios WHERE usuario = ?", (entrada.usuario,)).fetchone()
@@ -230,17 +283,86 @@ def login(entrada: Login):
             db.registrar_evento(con, "login_fallido", usuario=entrada.usuario if u else None)
             con.commit()
             raise HTTPException(401, "Usuario o contraseña incorrectos")
+
+        if u["totp_activo"]:
+            # Contraseña correcta, pero falta el segundo factor: todavía no hay sesión
+            reto = secrets.token_urlsafe(32)
+            for clave in [k for k, r in _retos_totp.items() if r["expira"] < ahora]:
+                del _retos_totp[clave]
+            _retos_totp[seguridad.hash_token(reto)] = {
+                "usuario": u["usuario"], "expira": ahora + VIGENCIA_RETO_SEG, "intentos": 0}
+            db.registrar_evento(con, "login_contrasena_ok", usuario=u["usuario"],
+                                detalle="falta el código TOTP")
+            return {"requiere_totp": True, "reto": reto}
+
+        # Sin autenticador todavía: la sesión solo sirve para activar la cuenta y configurarlo
         _intentos_fallidos.pop(entrada.usuario, None)
-        token, token_hash, expira = seguridad.nuevo_token()
-        con.execute("DELETE FROM sesiones WHERE expira <= ?", (seguridad.ahora(),))
-        con.execute("INSERT INTO sesiones (token_hash, usuario, expira) VALUES (?, ?, ?)",
-                    (token_hash, u["usuario"], expira))
-        db.registrar_evento(con, "login", usuario=u["usuario"])
-    return {"token": token, "expira": expira, **datos_publicos(dict(u))}
+        db.registrar_evento(con, "login", usuario=u["usuario"], detalle="sin MFA: debe configurarlo")
+        return crear_sesion(con, u)
+
+
+@app.post("/auth/login/totp")
+def login_totp(entrada: LoginTotp):
+    """Paso 2: código de 6 dígitos de la app autenticadora. Si es válido, entrega la sesión."""
+    clave = seguridad.hash_token(entrada.reto)
+    reto = _retos_totp.get(clave)
+    if not reto or reto["expira"] < time.time():
+        _retos_totp.pop(clave, None)
+        raise HTTPException(410, "El inicio de sesión expiró. Vuelva a escribir su contraseña.")
+    usuario = reto["usuario"]
+    recientes = bloqueado(usuario)
+
+    with db.conexion() as con:
+        u = con.execute("SELECT * FROM usuarios WHERE usuario = ?", (usuario,)).fetchone()
+        if not comprobar_totp(con, u, entrada.codigo):
+            _intentos_fallidos[usuario] = recientes + [time.time()]
+            reto["intentos"] += 1
+            if reto["intentos"] >= MAX_INTENTOS_RETO:
+                _retos_totp.pop(clave, None)
+            db.registrar_evento(con, "login_totp_fallido", usuario=usuario)
+            con.commit()
+            raise HTTPException(401, "Código del autenticador incorrecto o ya utilizado")
+        _retos_totp.pop(clave, None)
+        _intentos_fallidos.pop(usuario, None)
+        db.registrar_evento(con, "login", usuario=usuario, detalle="contraseña + TOTP")
+        return crear_sesion(con, u)
+
+
+@app.post("/yo/totp/iniciar")
+def totp_iniciar(u: dict = Depends(sesion_valida)):
+    """Genera el secreto del autenticador (queda pendiente hasta confirmarlo con un código)."""
+    if u["totp_activo"]:
+        raise HTTPException(409, "El autenticador ya está configurado")
+    if u["debe_cambiar"]:
+        # Con la contraseña temporal, quien la creó (el abogado) podría registrar SU teléfono
+        raise HTTPException(403, "Primero active su cuenta con una contraseña propia")
+    secreto = totp.nuevo_secreto()
+    with db.conexion() as con:
+        con.execute("UPDATE usuarios SET totp_secreto = ? WHERE usuario = ?",
+                    (seguridad.cifrar_secreto_totp(secreto, u["usuario"]), u["usuario"]))
+    return {"secreto": totp.a_base32(secreto), "uri": totp.uri(secreto, u["usuario"])}
+
+
+@app.post("/yo/totp/confirmar")
+def totp_confirmar(entrada: CodigoTotp, u: dict = Depends(sesion_valida)):
+    """El usuario demuestra que su app genera códigos correctos; desde ahora se exige MFA."""
+    if u["totp_activo"]:
+        raise HTTPException(409, "El autenticador ya está configurado")
+    if not u["totp_secreto"]:
+        raise HTTPException(400, "Primero genere el código QR")
+    recientes = bloqueado(u["usuario"])
+    with db.conexion() as con:
+        if not comprobar_totp(con, u, entrada.codigo):
+            _intentos_fallidos[u["usuario"]] = recientes + [time.time()]
+            raise HTTPException(401, "Código incorrecto. Revise la hora de su teléfono e intente de nuevo.")
+        con.execute("UPDATE usuarios SET totp_activo = 1 WHERE usuario = ?", (u["usuario"],))
+        db.registrar_evento(con, "totp_activado", usuario=u["usuario"])
+    _intentos_fallidos.pop(u["usuario"], None)
+    return {"ok": True}
 
 
 @app.post("/auth/logout")
-def logout(authorization: str = Header(default=""), u: dict = Depends(usuario_actual)):
+def logout(authorization: str = Header(default=""), u: dict = Depends(sesion_valida)):
     with db.conexion() as con:
         con.execute("DELETE FROM sesiones WHERE token_hash = ?",
                     (seguridad.hash_token(authorization.removeprefix("Bearer ")),))
@@ -248,12 +370,18 @@ def logout(authorization: str = Header(default=""), u: dict = Depends(usuario_ac
 
 
 @app.get("/yo")
-def yo(u: dict = Depends(usuario_actual)):
+def yo(u: dict = Depends(sesion_valida)):
     return datos_publicos(u)
 
 
+@app.get("/yo/llaves")
+def mis_llaves(u: dict = Depends(sesion_valida)):
+    """Mis llaves públicas registradas: el cliente local las compara con su llavero al entrar."""
+    return {k: u[k] for k in ("usuario", "publica_cifrado", "publica_firma", "publica_ed25519")}
+
+
 @app.post("/yo/activar")
-def activar_cliente(entrada: ActivarCliente, u: dict = Depends(usuario_actual)):
+def activar_cliente(entrada: ActivarCliente, u: dict = Depends(sesion_valida)):
     """Primer acceso del cliente: cambia la contraseña temporal y registra sus llaves públicas."""
     if u["rol"] != "cliente" or not u["debe_cambiar"]:
         raise HTTPException(400, "La cuenta ya está activada")

@@ -39,5 +39,9 @@ body { background: #f5f4ef; }
 
 code.hash { word-break: break-all; font-size: .75rem; }
 
+.qr-totp { width: 220px; height: 220px; background: #fff; padding: 6px; }
+.clave-totp { font-size: .95rem; letter-spacing: .05em; word-break: break-all; }
+.codigo-totp { letter-spacing: .4em; font-variant-numeric: tabular-nums; }
+
 .visor-pdf { width: 100%; height: 70vh; border: 1px solid #e6e1d3; border-radius: .5rem; }
 .vista-previa img { max-height: 70vh; }

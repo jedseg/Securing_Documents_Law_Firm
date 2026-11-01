@@ -132,6 +132,68 @@
     </div>
   </section>
 
+  <!-- ============================== Verificación en dos pasos (login) -->
+  <section id="vista-totp" class="vista d-none">
+    <div class="row justify-content-center">
+      <div class="col-md-5">
+        <div class="card shadow-sm">
+          <div class="card-body p-4">
+            <h1 class="h4 mb-1"><i class="bi bi-phone"></i> Verificación en dos pasos</h1>
+            <p class="text-muted small">Escriba el código de 6 dígitos que muestra su app autenticadora.</p>
+            <form id="form-totp" autocomplete="off">
+              <div class="mb-3">
+                <label class="form-label" for="totp-codigo">Código</label>
+                <input id="totp-codigo" class="form-control form-control-lg text-center codigo-totp" required
+                       inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code"
+                       title="6 dígitos">
+              </div>
+              <button class="btn btn-primary w-100" type="submit">Verificar</button>
+            </form>
+            <hr>
+            <p class="small mb-0 text-center"><a href="#" data-ir="vista-login">Volver</a></p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================== Alta del autenticador (1a vez) -->
+  <section id="vista-totp-alta" class="vista d-none">
+    <div class="row justify-content-center">
+      <div class="col-md-7">
+        <div class="card shadow-sm">
+          <div class="card-body p-4">
+            <h1 class="h4">Configure su autenticador</h1>
+            <p class="text-muted small">El bufete exige verificación en dos pasos: además de su contraseña,
+              al entrar se le pedirá un código que cambia cada 30 segundos.</p>
+            <ol class="small">
+              <li>Instale una app autenticadora en su teléfono (Google Authenticator, Microsoft Authenticator u otra).</li>
+              <li>Escanee este código QR desde la app.</li>
+              <li>Escriba el código de 6 dígitos que aparece.</li>
+            </ol>
+            <div class="text-center my-3">
+              <img id="totp-qr" class="qr-totp border rounded" alt="Código QR para la app autenticadora">
+            </div>
+            <p class="small text-center">¿No puede escanear? Escriba esta clave en la app:<br>
+              <code id="totp-secreto" class="clave-totp"></code></p>
+            <form id="form-totp-alta" autocomplete="off">
+              <div class="row g-2 justify-content-center">
+                <div class="col-sm-5">
+                  <input id="totp-alta-codigo" class="form-control text-center codigo-totp" required
+                         inputmode="numeric" pattern="[0-9]{6}" maxlength="6" placeholder="000000"
+                         title="6 dígitos" aria-label="Código de la app">
+                </div>
+                <div class="col-sm-auto">
+                  <button class="btn btn-primary w-100" type="submit"><i class="bi bi-shield-check"></i> Activar</button>
+                </div>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
   <!-- ============================================================ Panel -->
   <section id="vista-panel" class="vista d-none">
     <ul class="nav nav-tabs mb-4" role="tablist">

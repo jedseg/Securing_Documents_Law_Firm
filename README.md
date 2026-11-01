@@ -34,6 +34,7 @@ Sistema para proteger documentos legales (testamentos, fideicomisos, contratos) 
 | Registrarse (con el código del bufete) | ✅ | ❌ |
 | Dar de alta clientes | ✅ | ❌ |
 | Activar su cuenta (primer acceso, cambia la contraseña temporal) | — | ✅ |
+| Configurar su autenticador (verificación en dos pasos) | ✅ | ✅ |
 | Subir, firmar y proteger documentos (PDF, Word, imagen, texto) | ✅ | ❌ |
 | Ver los documentos en los que participa | ✅ | ✅ |
 | Autorizar la apertura (consentimiento firmado) | ✅ | ✅ |
@@ -49,10 +50,11 @@ Los permisos se aplican en el **servidor**; la interfaz solo oculta lo que cada 
 | `crypto_core.py` | Hash SHA-256, firma Ed25519, cifrado AES-256-GCM y el flujo `proteger()` / `abrir()` |
 | `shamir.py` | Esquema de Shamir *t* de *n*, implementación propia sobre el campo primo 2^521 − 1 |
 | `rsa_core.py` | RSA-3072: OAEP para cifrar fragmentos y PSS para firmar consentimientos |
+| `totp.py` | HOTP/TOTP (RFC 4226 / RFC 6238), implementación propia: segundo factor de autenticación |
 | `llavero.py` | Guarda las llaves privadas en el equipo del usuario, cifradas con su contraseña |
 | `backend/main.py` | API del servidor: login, roles, documentos, consentimientos, aportes y bitácora |
 | `backend/db.py` | Base de datos SQLite y almacén de documentos cifrados |
-| `backend/seguridad.py` | Contraseñas con scrypt y tokens de sesión |
+| `backend/seguridad.py` | Contraseñas con scrypt, tokens de sesión y cifrado de los secretos TOTP |
 | `cliente/main.py` | Cliente local: sirve la interfaz y hace la criptografía |
 | `cliente/paquete.py` | Junta nombre, tipo y contenido del archivo en un solo bloque que se firma y se cifra |
 | `cliente/servidor_api.py` | Conexión del cliente local con el servidor |
@@ -71,6 +73,7 @@ Los permisos se aplican en el **servidor**; la interfaz solo oculta lo que cada 
 | Protección de llaves privadas | PKCS#8 cifrado con la contraseña del usuario |
 | Contraseñas en el servidor | scrypt con sal aleatoria (nunca se guardan en claro) |
 | Sesiones | Token aleatorio de 256 bits; el servidor solo guarda su SHA-256 |
+| Autenticación de dos factores (MFA) | TOTP: HMAC-SHA1 sobre el tiempo (RFC 6238); secreto cifrado con AES-256-GCM en el servidor |
 
 ## Ejecutar
 
@@ -118,9 +121,9 @@ LLAVERO_DIR=llaves_cliente uvicorn cliente.main:app --port 8081
 
 ### Flujo de la demostración
 
-1. **Abogado (8080):** "Registrarse" con el código `BUFETE-2026` e iniciar sesión.
+1. **Abogado (8080):** "Registrarse" con el código `BUFETE-2026` e iniciar sesión. En el primer acceso escanea el QR con una app autenticadora (Google Authenticator, Microsoft Authenticator…) y escribe el código; desde entonces, cada inicio de sesión pide contraseña + código.
 2. **Abogado:** en *Mis clientes*, dar de alta al cliente con una contraseña temporal.
-3. **Cliente (8081):** iniciar sesión con la contraseña temporal y activar la cuenta (crea su contraseña y sus llaves en su equipo).
+3. **Cliente (8081):** iniciar sesión con la contraseña temporal y activar la cuenta (crea su contraseña y sus llaves en su equipo). Después configura su autenticador escaneando el QR.
 4. **Abogado:** en *Nuevo documento*, elegir al cliente, poner un título, seleccionar el archivo (máximo 20 MB) y enviar.
 5. **Cliente:** en *Documentos*, "Autorizar apertura". Si intenta abrir, el sistema dice que falta la autorización del abogado.
 6. **Abogado:** "Autorizar apertura" y "Abrir documento": se muestra la vista previa (PDF, imagen o texto) y el botón *Descargar* entrega el archivo original. El cliente también puede abrirlo.
@@ -138,9 +141,25 @@ LLAVERO_DIR=llaves_cliente uvicorn cliente.main:app --port 8081
 2. El participante descifra su fragmento con su llave privada (**RSA-OAEP**) y lo **vuelve a cifrar con la llave pública del otro participante** antes de enviarlo por el servidor. El servidor solo lo retransmite, sin poder leerlo.
 3. Cuando ambos autorizaron dentro de la ventana de 5 minutos, cada uno tiene los 2 fragmentos: se reconstruye la llave con **Shamir** (interpolación de Lagrange), se descifra con **AES-256-GCM** y se verifica la firma **Ed25519** del abogado.
 
+## Verificación en dos pasos (TOTP)
+
+Además de la contraseña (algo que el usuario **sabe**), se exige un código de su teléfono (algo que **tiene**).
+
+- **Algoritmo (`totp.py`, implementación propia):** `código = HMAC-SHA1(secreto, ⌊tiempo / 30⌋)` con truncamiento dinámico a 6 dígitos (RFC 4226 y RFC 6238).
+- **Alta:** el secreto (160 bits) se genera en el servidor y el cliente local lo muestra como código QR (`otpauth://`). Queda activo solo cuando el usuario escribe un código correcto. Un cliente con contraseña temporal **no** puede configurarlo: el abogado conoce esa contraseña y podría registrar su propio teléfono.
+- **Inicio de sesión en dos pasos:** con la contraseña correcta el servidor no entrega la sesión, sino un *reto* de un solo uso (5 minutos, máximo 5 intentos). La sesión solo se entrega con el código TOTP válido.
+- **Sin autenticador no hay acceso:** una sesión sin MFA configurado solo puede activar la cuenta y configurar el autenticador; documentos, clientes y bitácora responden 403.
+- **Anti-repetición:** se guarda el último periodo usado; un código ya utilizado (por ejemplo, interceptado) se rechaza.
+- **Desfase de reloj:** se acepta el código del periodo anterior y del siguiente (±30 s). Comparación en tiempo constante.
+- **Fuerza bruta:** los códigos incorrectos cuentan para el mismo bloqueo de 5 intentos que las contraseñas.
+- **Secreto en reposo:** a diferencia de una contraseña, el secreto TOTP no se puede guardar como hash (el servidor lo necesita para calcular el código), así que se guarda cifrado con AES-256-GCM y el nombre de usuario como dato asociado. La llave sale de la variable `TOTP_LLAVE` (64 caracteres hex) o, en desarrollo, se genera en `datos/totp.key`. En producción debe venir de un gestor de secretos, no del mismo disco que la base de datos.
+- **Alcance:** el MFA protege la **cuenta** en el servidor (títulos, bitácora, alta de clientes). Los documentos ya estaban protegidos aunque roben la contraseña, porque abrirlos exige las llaves privadas del llavero local de ambos participantes.
+
+Las bases de datos creadas antes del MFA se actualizan solas al iniciar el servidor; los usuarios existentes deberán configurar su autenticador en su siguiente inicio de sesión.
+
 ## Protecciones adicionales
 
-- **Servidor:** bloqueo tras 5 inicios de sesión fallidos; mismo tiempo de respuesta exista o no el usuario; código del bufete para registrar abogados; contraseña temporal obligatoria de cambiar para clientes.
+- **Servidor:** verificación en dos pasos (TOTP) obligatoria; bloqueo tras 5 intentos fallidos (contraseña o código); mismo tiempo de respuesta exista o no el usuario; código del bufete para registrar abogados; contraseña temporal obligatoria de cambiar para clientes.
 - **Cliente local:** solo acepta conexiones desde la propia computadora (`127.0.0.1`/`localhost`, evita *DNS rebinding*); exige una cabecera propia en cada operación (evita CSRF); cookie de sesión `HttpOnly` y `SameSite=Strict`; la interfaz nunca inserta datos del usuario como HTML (evita XSS).
 - Al iniciar sesión, el cliente local comprueba que las llaves públicas registradas en el servidor sean las de su llavero (detecta una suplantación de llaves).
 

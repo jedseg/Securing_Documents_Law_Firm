@@ -30,6 +30,9 @@ CREATE TABLE IF NOT EXISTS usuarios (
     publica_cifrado  TEXT,                   -- RSA-3072 (OAEP), PEM
     publica_firma    TEXT,                   -- RSA-3072 (PSS), PEM
     publica_ed25519  TEXT,                   -- Ed25519, PEM (solo abogados)
+    totp_secreto     BLOB,                   -- secreto TOTP cifrado con AES-256-GCM
+    totp_activo      INTEGER NOT NULL DEFAULT 0,          -- 1 = autenticador confirmado
+    totp_ultimo_paso INTEGER NOT NULL DEFAULT 0,          -- último código usado (anti-repetición)
     creado           TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -88,6 +91,18 @@ def iniciar() -> None:
     ALMACEN_DIR.mkdir(parents=True, exist_ok=True)
     with conexion() as con:
         con.executescript(ESQUEMA)
+        # Bases de datos creadas antes del MFA: se agregan las columnas de TOTP
+        existentes = {c["name"] for c in con.execute("PRAGMA table_info(usuarios)")}
+        for columna, tipo in COLUMNAS_TOTP.items():
+            if columna not in existentes:
+                con.execute(f"ALTER TABLE usuarios ADD COLUMN {columna} {tipo}")
+
+
+COLUMNAS_TOTP = {
+    "totp_secreto": "BLOB",
+    "totp_activo": "INTEGER NOT NULL DEFAULT 0",
+    "totp_ultimo_paso": "INTEGER NOT NULL DEFAULT 0",
+}
 
 
 @contextmanager
