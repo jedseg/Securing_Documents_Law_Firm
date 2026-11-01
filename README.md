@@ -115,6 +115,18 @@ openssl s_client -connect localhost:443 -servername bufete.internal -tls1_2 </de
 
 En producción (AWS) solo se levanta `docker-compose.yml`, con un archivo `.env` basado en `.env.example` (dominio, correo para Let's Encrypt, código del bufete y `TOTP_LLAVE`).
 
+### Clientes conectados al servidor en la nube
+
+Cada usuario corre su cliente local en su computadora, apuntando al dominio del servidor:
+
+```bash
+SERVIDOR_URL=https://bufete-escom.duckdns.org docker compose -f docker-compose.clientes.yml up --build
+```
+
+- Abogado: http://127.0.0.1:8080 — Cliente: http://127.0.0.1:8081 (los dos en la misma computadora solo para demostrarlo).
+- El certificado de Let's Encrypt se verifica con las autoridades públicas y el cliente exige TLS 1.3.
+- Las llaves privadas se guardan en `llaves_nube_abogado/` y `llaves_nube_cliente/`, en la computadora del usuario; nunca llegan al servidor.
+
 ## Ejecutar sin Docker
 
 La primera vez:

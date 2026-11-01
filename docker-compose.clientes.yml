@@ -1,0 +1,35 @@
+# Clientes locales conectados al servidor del bufete EN LA NUBE.
+#
+#   SERVIDOR_URL=https://mi-bufete.duckdns.org docker compose -f docker-compose.clientes.yml up --build
+#
+#   Abogado: http://127.0.0.1:8080      Cliente: http://127.0.0.1:8081
+#
+# - El certificado del servidor (Let's Encrypt) se verifica con las autoridades
+#   públicas, y el cliente exige TLS 1.3.
+# - Las llaves privadas se quedan en ESTA computadora, en carpetas distintas a las
+#   de la demo local (las cuentas de la nube son otras).
+# - En la vida real cada persona corre solo SU cliente en su computadora;
+#   aquí están los dos para poder demostrarlo en una sola máquina.
+
+services:
+  abogado:
+    build: .
+    command: ["uvicorn", "cliente.main:app", "--host", "0.0.0.0", "--port", "8080"]
+    environment:
+      LLAVERO_DIR: /llaves
+      SERVIDOR_URL: ${SERVIDOR_URL:?Defina SERVIDOR_URL, por ejemplo https://mi-bufete.duckdns.org}
+    volumes:
+      - ./llaves_nube_abogado:/llaves
+    ports:
+      - "127.0.0.1:8080:8080"
+
+  cliente:
+    build: .
+    command: ["uvicorn", "cliente.main:app", "--host", "0.0.0.0", "--port", "8081"]
+    environment:
+      LLAVERO_DIR: /llaves
+      SERVIDOR_URL: ${SERVIDOR_URL:?Defina SERVIDOR_URL, por ejemplo https://mi-bufete.duckdns.org}
+    volumes:
+      - ./llaves_nube_cliente:/llaves
+    ports:
+      - "127.0.0.1:8081:8081"
